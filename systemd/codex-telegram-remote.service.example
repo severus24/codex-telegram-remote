@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram control plane for Codex CLI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__EXECUTABLE__ run --env __CONFIG__
+WorkingDirectory=__HOME__
+Restart=on-failure
+RestartSec=10
+Environment=PATH=__PATH__
+StandardOutput=append:__DATA_DIR__/stdout.log
+StandardError=append:__DATA_DIR__/stderr.log
+
+[Install]
+WantedBy=default.target
