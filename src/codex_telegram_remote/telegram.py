@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html
 import json
+import mimetypes
 import re
 import time
 import urllib.parse
 import urllib.request
+import uuid
+from pathlib import Path
 from typing import Any
 
 from codex_telegram_remote.store import utc_now
@@ -169,13 +172,65 @@ class TelegramBotAPI:
             urllib.parse.urlencode(values).encode("utf-8"),
         )
 
-    def _request(self, method: str, data: bytes) -> dict[str, Any]:
+    def send_photo(
+        self,
+        chat_id: int,
+        path: Path,
+        *,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        if not path.is_file():
+            raise TelegramError(f"图片不存在: {path}")
+        if path.stat().st_size > 10 * 1024 * 1024:
+            raise TelegramError(f"图片超过 Telegram 10MB 限制: {path}")
+        boundary = f"----CodexTelegram{uuid.uuid4().hex}"
+        fields = {"chat_id": str(chat_id)}
+        if caption:
+            fields["caption"] = caption[:1024]
+        if reply_to_message_id:
+            fields["reply_to_message_id"] = str(reply_to_message_id)
+        body = bytearray()
+        for key, value in fields.items():
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
+            )
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
+        content_type = (
+            mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        )
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            (
+                'Content-Disposition: form-data; name="photo"; '
+                f'filename="{path.name}"\r\n'
+            ).encode("utf-8")
+        )
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
+        body.extend(path.read_bytes())
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode())
+        self._request(
+            "sendPhoto",
+            bytes(body),
+            content_type=f"multipart/form-data; boundary={boundary}",
+        )
+
+    def _request(
+        self,
+        method: str,
+        data: bytes,
+        *,
+        content_type: str = "application/x-www-form-urlencoded",
+    ) -> dict[str, Any]:
         request = urllib.request.Request(
             f"https://api.telegram.org/bot{self.bot_token}/{method}",
             data=data,
             method="POST",
             headers={
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Type": content_type,
                 "User-Agent": "codex-telegram-remote/0.1",
             },
         )

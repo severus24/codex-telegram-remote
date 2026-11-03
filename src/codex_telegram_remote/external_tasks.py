@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import urllib.parse
@@ -11,6 +12,8 @@ from typing import Any, Callable
 
 
 LOGGER = logging.getLogger("codex_telegram_remote.external_tasks")
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +200,77 @@ class ExternalTaskMonitor:
             ),
             error_text=_error_text(row["error_json"]),
         )
+
+    def images_for_thread(
+        self,
+        thread_id: str,
+        *,
+        limit: int = 5,
+    ) -> tuple[Path, ...]:
+        turn = self.latest_turn(thread_id)
+        if turn is None:
+            return ()
+        cwd = self._thread_cwd(thread_id)
+        candidates: list[Path] = []
+        connection = _readonly_connection(self.thread_history_db)
+        try:
+            rows = connection.execute(
+                """
+                SELECT item_json
+                FROM thread_items
+                WHERE thread_id = ?
+                  AND turn_id = ?
+                  AND item_type IN ('imageView', 'localImage', 'image')
+                ORDER BY rollout_ordinal
+                """,
+                (thread_id, turn.turn_id),
+            ).fetchall()
+        finally:
+            connection.close()
+        for row in rows:
+            path = _item_path(row["item_json"])
+            if path:
+                candidates.append(path)
+
+        if cwd is not None and turn.started_at is not None:
+            start = turn.started_at - 5
+            end = (turn.completed_at or int(self.now())) + 5
+            candidates.extend(_recent_images(cwd, start, end))
+
+        result: list[Path] = []
+        seen: set[str] = set()
+        for path in candidates:
+            try:
+                normalized = path.expanduser().resolve(strict=True)
+                if not normalized.is_file():
+                    continue
+                if normalized.suffix.lower() not in IMAGE_SUFFIXES:
+                    continue
+                if normalized.stat().st_size > MAX_IMAGE_BYTES:
+                    continue
+                key = str(normalized)
+            except OSError:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(normalized)
+            if len(result) >= limit:
+                break
+        return tuple(result)
+
+    def _thread_cwd(self, thread_id: str) -> Path | None:
+        if not self.state_db.is_file():
+            return None
+        connection = _readonly_connection(self.state_db)
+        try:
+            row = connection.execute(
+                "SELECT cwd FROM threads WHERE id = ?",
+                (thread_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        return Path(str(row["cwd"])) if row else None
 
     def recent_for(self, repo_path: Path, limit: int) -> RecentTaskState:
         if not self.state_db.is_file():
@@ -490,6 +564,59 @@ def _error_text(value: Any) -> str:
         if isinstance(message, str) and message:
             return _truncate_text(message, 10000)
     return _truncate_text(value, 10000)
+
+
+def _item_path(raw: object) -> Path | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    path = payload.get("path")
+    return Path(str(path)).expanduser() if path else None
+
+
+def _recent_images(root: Path, start: int, end: int) -> list[Path]:
+    if not root.is_dir():
+        return []
+    skipped = {
+        ".git",
+        ".venv",
+        ".next",
+        ".build",
+        "node_modules",
+        "__pycache__",
+    }
+    found: list[Path] = []
+    visited = 0
+    for current, dirs, files in os.walk(root):
+        current_path = Path(current)
+        try:
+            depth = len(current_path.relative_to(root).parts)
+        except ValueError:
+            continue
+        if depth >= 3:
+            dirs[:] = []
+        else:
+            dirs[:] = [name for name in dirs if name not in skipped]
+        for name in files:
+            visited += 1
+            if visited > 5000:
+                return found
+            path = current_path / name
+            if path.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if start <= int(stat.st_mtime) <= end and stat.st_size <= MAX_IMAGE_BYTES:
+                found.append(path)
+    found.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return found
 
 
 def _truncate_text(value: str, limit: int) -> str:

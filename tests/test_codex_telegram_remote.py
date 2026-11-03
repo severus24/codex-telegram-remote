@@ -43,6 +43,7 @@ class FakeTelegram:
         self.markups: list[dict[str, object] | None] = []
         self.callback_answers: list[tuple[str, str, bool]] = []
         self.reactions: list[tuple[int, int, str]] = []
+        self.photos: list[tuple[int, Path, str]] = []
         self.on_send = None
         self.commands: list[dict[str, str]] = []
         self.menu_button: dict[str, str] | None = None
@@ -83,6 +84,16 @@ class FakeTelegram:
         emoji: str = "👀",
     ) -> None:
         self.reactions.append((chat_id, message_id, emoji))
+
+    def send_photo(
+        self,
+        chat_id: int,
+        path: Path,
+        *,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        self.photos.append((chat_id, path, caption))
 
 
 class FakeRunner:
@@ -350,6 +361,21 @@ class ExternalTaskTests(unittest.TestCase):
                 active_window_seconds=200,
                 now=lambda: 1000,
             ).recent_for(repo, limit=5)
+            image_path = repo / "work" / "preview.png"
+            image_path.parent.mkdir()
+            image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+            _add_thread_image_item(
+                history_db,
+                thread_id="recent-1",
+                turn_id="turn-1",
+                image_path=image_path,
+            )
+            images = ExternalTaskMonitor(
+                state_db=state_db,
+                thread_history_db=history_db,
+                active_window_seconds=200,
+                now=lambda: 1000,
+            ).images_for_thread("recent-1")
             all_result = ExternalTaskMonitor(
                 state_db=state_db,
                 thread_history_db=history_db,
@@ -365,6 +391,8 @@ class ExternalTaskTests(unittest.TestCase):
         self.assertEqual("failed", result.tasks[1].status)
         self.assertEqual("失败的详细结果", result.tasks[1].result)
         self.assertEqual(3, len(all_result.tasks))
+        self.assertEqual(1, len(images))
+        self.assertEqual(image_path.resolve(), images[0])
 
 
 class StoreTests(unittest.TestCase):
@@ -530,6 +558,20 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual("setMessageReaction", calls[4].args[0])
         self.assertIn("👀", reaction_data["reaction"][0])
         self.assertEqual("HTML", message_data["parse_mode"][0])
+
+    def test_send_photo_uses_multipart_form_data(self) -> None:
+        api = TelegramBotAPI("123456:abcdefghijklmnop")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image = Path(temp_dir) / "preview.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            with patch.object(api, "_request", return_value={"ok": True}) as request:
+                api.send_photo(123, image, caption="Preview")
+
+        content_type = request.call_args.kwargs["content_type"]
+        body = request.call_args.args[1]
+        self.assertIn("multipart/form-data; boundary=", content_type)
+        self.assertIn(b'name="photo"', body)
+        self.assertIn(b"preview.png", body)
 
     def test_markdown_is_rendered_as_telegram_html(self) -> None:
         rendered = markdown_to_telegram_html(
@@ -1164,7 +1206,9 @@ class ServiceTests(unittest.TestCase):
                     completed_at=200,
                     result_text="界面优化已经完成，并补充了测试。",
                 ),
+                images=(root / "preview.png",),
             )
+            (root / "preview.png").write_bytes(b"\x89PNG\r\n\x1a\n")
             service = CodexRemoteService(
                 config=config,
                 telegram=telegram,
@@ -1178,6 +1222,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([], pending)
         self.assertIn("Codex App 任务已完成", telegram.messages[0][1])
         self.assertIn("Optimize UI", telegram.messages[0][1])
+        self.assertEqual(1, len(telegram.photos))
         self.assertIn("对话 ID：thread-1", telegram.messages[0][1])
         self.assertIn("界面优化已经完成", telegram.messages[0][1])
 
@@ -1229,10 +1274,12 @@ class FakeExternalTaskMonitor:
         *,
         turn: TurnState | None = None,
         recent: RecentTaskState | None = None,
+        images: tuple[Path, ...] = (),
     ):
         self.state = state
         self.turn = turn
         self.recent = recent or RecentTaskState(tasks=(), available=True)
+        self.images = images
 
     @staticmethod
     def now() -> float:
@@ -1246,6 +1293,14 @@ class FakeExternalTaskMonitor:
 
     def latest_turn(self, _thread_id: str) -> TurnState | None:
         return self.turn
+
+    def images_for_thread(
+        self,
+        _thread_id: str,
+        *,
+        limit: int = 5,
+    ) -> tuple[Path, ...]:
+        return self.images[:limit]
 
     def recent_for(
         self,
@@ -1426,6 +1481,38 @@ def _add_external_turn_details(
                     ),
                 ),
             )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _add_thread_image_item(
+    db_path: Path,
+    *,
+    thread_id: str,
+    turn_id: str,
+    image_path: Path,
+) -> None:
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO thread_items(
+                thread_id, turn_id, item_id, rollout_ordinal,
+                created_at_ms, item_json, item_type, updated_at_ordinal
+            ) VALUES (?, ?, ?, ?, ?, ?, 'imageView', 0)
+            """,
+            (
+                thread_id,
+                turn_id,
+                "image-view-1",
+                100,
+                1_000_000,
+                json.dumps(
+                    {"type": "imageView", "path": str(image_path)}
+                ),
+            ),
+        )
         connection.commit()
     finally:
         connection.close()

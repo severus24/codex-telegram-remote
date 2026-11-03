@@ -569,6 +569,27 @@ class CodexRemoteService:
                 )
             )
             if self._safe_send(watched.chat_id, message):
+                try:
+                    images = self.external_tasks.images_for_thread(
+                        watched.thread_id
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "failed to resolve images thread_id=%s",
+                        watched.thread_id,
+                        exc_info=True,
+                    )
+                    images = ()
+                for index, image in enumerate(images):
+                    self._safe_send_photo(
+                        watched.chat_id,
+                        image,
+                        caption=(
+                            f"{watched.title} · 图片 {index + 1}/{len(images)}"
+                            if image
+                            else ""
+                        ),
+                    )
                 self.store.mark_watched_task_notified(
                     thread_id=watched.thread_id,
                     chat_id=watched.chat_id,
@@ -995,6 +1016,28 @@ class CodexRemoteService:
             )
         except TelegramError:
             LOGGER.exception("failed to answer telegram callback")
+
+    def _safe_send_photo(
+        self,
+        chat_id: int,
+        path: Path,
+        *,
+        caption: str = "",
+    ) -> bool:
+        try:
+            self.telegram.send_photo(
+                chat_id,
+                path,
+                caption=self._redact(caption),
+            )
+            return True
+        except TelegramError:
+            LOGGER.exception(
+                "failed to send telegram photo chat_id=%s path=%s",
+                chat_id,
+                path,
+            )
+            return False
 
     def _safe_react(self, chat_id: int, message_id: int) -> None:
         try:

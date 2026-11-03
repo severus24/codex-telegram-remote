@@ -14,6 +14,7 @@ Control a local Codex installation from a Telegram private chat with:
 - completion and failure notifications with results
 - notification discovery for every main Codex task regardless of repository
   allowlist or working directory
+- PNG/JPEG/WebP previews associated with completed tasks
 - Telegram command menus, inline buttons and callbacks
 - Markdown-to-Telegram HTML rendering
 - `read-only` or `workspace-write` sandboxing
