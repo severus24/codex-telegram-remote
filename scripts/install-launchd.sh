@@ -5,21 +5,22 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLIST_TEMPLATE="${PROJECT_DIR}/launchd/com.codex-telegram-remote.plist.example"
 PLIST_TARGET="${HOME}/Library/LaunchAgents/com.codex-telegram-remote.plist"
 EXECUTABLE="${CODEX_TELEGRAM_REMOTE_BIN:-$(command -v codex-telegram-remote || true)}"
+PYTHON_BIN="${CODEX_TELEGRAM_REMOTE_PYTHON:-$(command -v python3 || true)}"
 CONFIG="${CODEX_REMOTE_CONFIG:-${HOME}/.config/codex-telegram-remote/config.env}"
 DATA_DIR="${HOME}/Library/Application Support/codex-telegram-remote"
 TOOL_PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}:/usr/bin:/bin:/usr/sbin:/sbin"
 
-if [[ -z "${EXECUTABLE}" ]]; then
+if [[ -z "${EXECUTABLE}" || -z "${PYTHON_BIN}" ]]; then
   print -u2 "codex-telegram-remote is not installed in PATH"
   print -u2 "Run: python3 -m pip install -e ${PROJECT_DIR}"
   exit 2
 fi
 
-"${EXECUTABLE}" check --env "${CONFIG}"
+"${PYTHON_BIN}" -m codex_telegram_remote check --env "${CONFIG}"
 
 mkdir -p "${HOME}/Library/LaunchAgents" "${DATA_DIR}"
 sed \
-  -e "s|__EXECUTABLE__|${EXECUTABLE}|g" \
+  -e "s|__PYTHON__|${PYTHON_BIN}|g" \
   -e "s|__CONFIG__|${CONFIG}|g" \
   -e "s|__HOME__|${HOME}|g" \
   -e "s|__DATA_DIR__|${DATA_DIR}|g" \

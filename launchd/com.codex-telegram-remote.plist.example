@@ -8,7 +8,9 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>__EXECUTABLE__</string>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>codex_telegram_remote</string>
     <string>run</string>
     <string>--env</string>
     <string>__CONFIG__</string>
