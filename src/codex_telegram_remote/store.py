@@ -311,30 +311,48 @@ class RemoteStore:
         repo: str,
         title: str,
         started_at: int,
+        reset: bool = True,
     ) -> None:
         with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO watched_tasks(
-                    thread_id, chat_id, repo, title, started_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(thread_id, chat_id) DO UPDATE SET
-                    repo = excluded.repo,
-                    title = excluded.title,
-                    started_at = excluded.started_at,
-                    outcome = '',
-                    created_at = excluded.created_at,
-                    notified_at = ''
-                """,
-                (
-                    thread_id,
-                    chat_id,
-                    repo,
-                    title,
-                    started_at,
-                    utc_now(),
-                ),
-            )
+            if reset:
+                connection.execute(
+                    """
+                    INSERT INTO watched_tasks(
+                        thread_id, chat_id, repo, title, started_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id, chat_id) DO UPDATE SET
+                        repo = excluded.repo,
+                        title = excluded.title,
+                        started_at = excluded.started_at,
+                        outcome = '',
+                        created_at = excluded.created_at,
+                        notified_at = ''
+                    """,
+                    (
+                        thread_id,
+                        chat_id,
+                        repo,
+                        title,
+                        started_at,
+                        utc_now(),
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO watched_tasks(
+                        thread_id, chat_id, repo, title, started_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        thread_id,
+                        chat_id,
+                        repo,
+                        title,
+                        started_at,
+                        utc_now(),
+                    ),
+                )
 
     def pending_watched_tasks(self) -> list[WatchedTask]:
         with self.connect() as connection:

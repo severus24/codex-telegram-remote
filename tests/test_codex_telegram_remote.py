@@ -155,12 +155,12 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(any("CODEX_REMOTE_SANDBOX" in item for item in config.validate()))
 
-    def test_does_not_reuse_unrelated_telegram_token(self) -> None:
+    def test_does_not_reuse_x_archive_telegram_token(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             repo = root / "repo"
             repo.mkdir()
-            env_file = root / "config.env"
+            env_file = root / "codex_remote.env"
             env_file.write_text(
                 "\n".join(
                     (
@@ -263,10 +263,12 @@ class ExternalTaskTests(unittest.TestCase):
                 now=lambda: 1000,
             )
             result = monitor.running_for(clipflow)
+            all_result = monitor.running_all()
 
         self.assertTrue(result.available)
         self.assertEqual(1, len(result.tasks))
         self.assertEqual("ClipFlow task", result.tasks[0].title)
+        self.assertEqual(2, len(all_result.tasks))
 
     def test_ignores_thread_whose_latest_turn_completed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -348,6 +350,12 @@ class ExternalTaskTests(unittest.TestCase):
                 active_window_seconds=200,
                 now=lambda: 1000,
             ).recent_for(repo, limit=5)
+            all_result = ExternalTaskMonitor(
+                state_db=state_db,
+                thread_history_db=history_db,
+                active_window_seconds=200,
+                now=lambda: 1000,
+            ).recent_all(since=950, limit=10)
 
         self.assertTrue(result.available)
         self.assertEqual(2, len(result.tasks))
@@ -356,6 +364,7 @@ class ExternalTaskTests(unittest.TestCase):
         self.assertEqual("最近任务列表已经完成", result.tasks[0].result)
         self.assertEqual("failed", result.tasks[1].status)
         self.assertEqual("失败的详细结果", result.tasks[1].result)
+        self.assertEqual(3, len(all_result.tasks))
 
 
 class StoreTests(unittest.TestCase):
@@ -1065,6 +1074,48 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual("thread-auto", pending[0].thread_id)
         self.assertEqual(123, pending[0].chat_id)
 
+    def test_auto_watches_completed_task_outside_repo_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = root / "repo"
+            unknown = root / "UnlistedProject"
+            repo.mkdir()
+            unknown.mkdir()
+            config = _config(root, repo)
+            store = RemoteStore(root / "state.db")
+            store.initialize()
+            external = FakeExternalTaskMonitor(
+                ExternalTaskState(tasks=(), available=True),
+                recent=RecentTaskState(
+                    tasks=(
+                        RecentTask(
+                            thread_id="thread-global",
+                            title="Global completed task",
+                            prompt="Run outside allowlist",
+                            result="Done",
+                            status="completed",
+                            updated_at=990,
+                            cwd=str(unknown),
+                            started_at=900,
+                        ),
+                    ),
+                    available=True,
+                ),
+            )
+            service = CodexRemoteService(
+                config=config,
+                telegram=FakeTelegram(),
+                store=store,
+                runner=FakeRunner(),
+                external_tasks=external,
+            )
+            service._auto_watch_external_tasks()
+            pending = store.pending_watched_tasks()
+
+        self.assertEqual(1, len(pending))
+        self.assertEqual("thread-global", pending[0].thread_id)
+        self.assertEqual("UnlistedProject", pending[0].repo)
+
     def test_message_reaction_confirms_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1190,6 +1241,9 @@ class FakeExternalTaskMonitor:
     def running_for(self, _path: Path) -> ExternalTaskState:
         return self.state
 
+    def running_all(self) -> ExternalTaskState:
+        return self.state
+
     def latest_turn(self, _thread_id: str) -> TurnState | None:
         return self.turn
 
@@ -1197,6 +1251,14 @@ class FakeExternalTaskMonitor:
         self,
         _path: Path,
         _limit: int,
+    ) -> RecentTaskState:
+        return self.recent
+
+    def recent_all(
+        self,
+        _since: int,
+        *,
+        limit: int = 300,
     ) -> RecentTaskState:
         return self.recent
 
@@ -1228,7 +1290,8 @@ def _create_external_state_db(path: Path, rows: tuple[tuple, ...]) -> None:
                 first_user_message TEXT NOT NULL DEFAULT '',
                 cwd TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
-                archived INTEGER NOT NULL DEFAULT 0
+                archived INTEGER NOT NULL DEFAULT 0,
+                agent_nickname TEXT
             )
             """
         )

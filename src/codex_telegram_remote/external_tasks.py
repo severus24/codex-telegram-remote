@@ -57,6 +57,8 @@ class RecentTask:
     result: str
     status: str
     updated_at: int
+    cwd: str = ""
+    started_at: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,31 @@ class ExternalTaskMonitor:
             tasks = self._threads_for_cwd(repo_path, active_turns, cutoff)
         except sqlite3.Error as error:
             LOGGER.warning("failed to read external Codex task state: %s", error)
+            return ExternalTaskState(
+                tasks=(),
+                available=False,
+                error=f"Codex App 状态读取失败: {error}",
+            )
+        return ExternalTaskState(tasks=tuple(tasks), available=True)
+
+    def running_all(self) -> ExternalTaskState:
+        if not self.state_db.is_file() or not self.thread_history_db.is_file():
+            return ExternalTaskState(
+                tasks=(),
+                available=False,
+                error="Codex App 状态数据库不可用",
+            )
+        now = int(self.now())
+        cutoff = now - self.active_window_seconds
+        try:
+            active_turns = self._latest_active_turns(cutoff)
+            tasks = (
+                self._threads_all(active_turns, cutoff)
+                if active_turns
+                else []
+            )
+        except sqlite3.Error as error:
+            LOGGER.warning("failed to read all Codex tasks: %s", error)
             return ExternalTaskState(
                 tasks=(),
                 available=False,
@@ -205,6 +232,42 @@ class ExternalTaskMonitor:
             )
         return RecentTaskState(tasks=tuple(tasks), available=True)
 
+    def recent_all(self, since: int, *, limit: int = 300) -> RecentTaskState:
+        if not self.state_db.is_file():
+            return RecentTaskState(
+                tasks=(),
+                available=False,
+                error="Codex App 状态数据库不可用",
+            )
+        try:
+            connection = _readonly_connection(self.state_db)
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        id, name, title, preview, first_user_message,
+                        cwd, updated_at
+                    FROM threads
+                    WHERE archived = 0
+                      AND agent_nickname IS NULL
+                      AND updated_at >= ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (since, limit),
+                ).fetchall()
+            finally:
+                connection.close()
+            tasks = self._recent_tasks_from_rows(rows, None, limit)
+        except sqlite3.Error as error:
+            LOGGER.warning("failed to read recently updated Codex tasks: %s", error)
+            return RecentTaskState(
+                tasks=(),
+                available=False,
+                error=f"Codex App 会话读取失败: {error}",
+            )
+        return RecentTaskState(tasks=tuple(tasks), available=True)
+
     def resolve_thread(
         self,
         repo_path: Path,
@@ -237,13 +300,14 @@ class ExternalTaskMonitor:
     def _recent_tasks_from_rows(
         self,
         rows: Any,
-        repo_path: Path,
+        repo_path: Path | None,
         limit: int,
     ) -> list[RecentTask]:
-        expected_cwd = _normal_cwd(repo_path)
+        expected_cwd = _normal_cwd(repo_path) if repo_path is not None else None
         tasks: list[RecentTask] = []
         for row in rows:
-            if _normal_cwd(Path(str(row["cwd"]))) != expected_cwd:
+            cwd = str(row["cwd"])
+            if expected_cwd is not None and _normal_cwd(Path(cwd)) != expected_cwd:
                 continue
             thread_id = str(row["id"])
             title = str(
@@ -260,6 +324,7 @@ class ExternalTaskMonitor:
             )
             status = ""
             result = ""
+            started_at = 0
             try:
                 turn = self.latest_turn(thread_id)
             except sqlite3.Error as error:
@@ -273,6 +338,7 @@ class ExternalTaskMonitor:
                 status = turn.status
                 prompt = turn.user_text or prompt
                 result = turn.result_text
+                started_at = turn.started_at or 0
                 if turn.status != "completed":
                     result = turn.error_text or result
             tasks.append(
@@ -283,6 +349,8 @@ class ExternalTaskMonitor:
                     result=result,
                     status=status,
                     updated_at=int(row["updated_at"]),
+                    cwd=cwd,
+                    started_at=started_at,
                 )
             )
             if len(tasks) >= limit:
@@ -322,6 +390,18 @@ class ExternalTaskMonitor:
         active_turns: dict[str, int],
         cutoff: int,
     ) -> list[ExternalTask]:
+        expected_cwd = _normal_cwd(repo_path)
+        return [
+            task
+            for task in self._threads_all(active_turns, cutoff)
+            if _normal_cwd(Path(task.cwd)) == expected_cwd
+        ]
+
+    def _threads_all(
+        self,
+        active_turns: dict[str, int],
+        cutoff: int,
+    ) -> list[ExternalTask]:
         connection = _readonly_connection(self.state_db)
         placeholders = ",".join("?" for _ in active_turns)
         try:
@@ -331,6 +411,7 @@ class ExternalTaskMonitor:
                 FROM threads
                 WHERE id IN ({placeholders})
                   AND archived = 0
+                  AND agent_nickname IS NULL
                   AND updated_at >= ?
                 """,
                 (*active_turns.keys(), cutoff),
@@ -338,11 +419,8 @@ class ExternalTaskMonitor:
         finally:
             connection.close()
 
-        expected_cwd = _normal_cwd(repo_path)
         tasks: list[ExternalTask] = []
         for row in rows:
-            if _normal_cwd(Path(str(row["cwd"]))) != expected_cwd:
-                continue
             title = str(
                 row["name"]
                 or row["title"]

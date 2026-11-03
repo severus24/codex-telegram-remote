@@ -24,6 +24,7 @@
 - `codex exec resume` 继续指定历史任务
 - 最近任务/对话列表与序号按钮
 - Codex App 运行任务状态、完成结果和失败结果通知
+- 自动发现所有 Codex 主任务并通知，不受仓库白名单或项目目录限制
 - Telegram 命令菜单、内联按钮和 callback 交互
 - Markdown 转 Telegram HTML，解析失败自动降级为纯文本
 - `read-only` 和 `workspace-write` 沙箱

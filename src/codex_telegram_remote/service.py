@@ -4,6 +4,7 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from codex_telegram_remote.config import RemoteConfig
@@ -496,11 +497,10 @@ class CodexRemoteService:
             self._stop_event.wait(self.config.watch_poll_seconds)
 
     def _auto_watch_external_tasks(self) -> None:
-        for repo, repo_path in self.config.repositories.items():
-            state = self.external_tasks.running_for(repo_path)
-            if not state.available:
-                continue
-            for task in state.tasks:
+        active = self.external_tasks.running_all()
+        if active.available:
+            for task in active.tasks:
+                repo = self._repo_label_for_cwd(task.cwd)
                 for chat_id in self.config.allowed_user_ids:
                     self.store.watch_task(
                         thread_id=task.thread_id,
@@ -509,6 +509,36 @@ class CodexRemoteService:
                         title=task.title,
                         started_at=task.started_at,
                     )
+
+        now = int(self.external_tasks.now())
+        cursor = self.store.get_state("external_watch_cursor", "")
+        try:
+            since = int(cursor) if cursor else now
+        except ValueError:
+            since = now
+        recent = self.external_tasks.recent_all(since, limit=300)
+        if recent.available:
+            for task in recent.tasks:
+                if task.status not in {"completed", "failed", "interrupted"}:
+                    continue
+                repo = self._repo_label_for_cwd(task.cwd)
+                for chat_id in self.config.allowed_user_ids:
+                    self.store.watch_task(
+                        thread_id=task.thread_id,
+                        chat_id=chat_id,
+                        repo=repo,
+                        title=task.title,
+                        started_at=task.started_at,
+                        reset=False,
+                    )
+            self.store.set_state("external_watch_cursor", str(now - 2))
+
+    def _repo_label_for_cwd(self, cwd: str) -> str:
+        normalized = Path(cwd).expanduser().resolve(strict=False)
+        for alias, repo_path in self.config.repositories.items():
+            if repo_path.resolve(strict=False) == normalized:
+                return alias
+        return normalized.name or "external"
 
     def _check_watched_tasks(self) -> None:
         for watched in self.store.pending_watched_tasks():
