@@ -580,15 +580,11 @@ class CodexRemoteService:
                         exc_info=True,
                     )
                     images = ()
-                for index, image in enumerate(images):
-                    self._safe_send_photo(
+                if images:
+                    self._safe_send_photos(
                         watched.chat_id,
-                        image,
-                        caption=(
-                            f"{watched.title} · 图片 {index + 1}/{len(images)}"
-                            if image
-                            else ""
-                        ),
+                        images,
+                        caption=watched.title,
                     )
                 self.store.mark_watched_task_notified(
                     thread_id=watched.thread_id,
@@ -1017,25 +1013,25 @@ class CodexRemoteService:
         except TelegramError:
             LOGGER.exception("failed to answer telegram callback")
 
-    def _safe_send_photo(
+    def _safe_send_photos(
         self,
         chat_id: int,
-        path: Path,
+        paths: tuple[Path, ...],
         *,
         caption: str = "",
     ) -> bool:
         try:
-            self.telegram.send_photo(
+            self.telegram.send_photos(
                 chat_id,
-                path,
+                paths,
                 caption=self._redact(caption),
             )
             return True
         except TelegramError:
             LOGGER.exception(
-                "failed to send telegram photo chat_id=%s path=%s",
+                "failed to send telegram photos chat_id=%s count=%s",
                 chat_id,
-                path,
+                len(paths),
             )
             return False
 

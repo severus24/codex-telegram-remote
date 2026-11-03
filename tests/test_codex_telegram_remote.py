@@ -44,6 +44,7 @@ class FakeTelegram:
         self.callback_answers: list[tuple[str, str, bool]] = []
         self.reactions: list[tuple[int, int, str]] = []
         self.photos: list[tuple[int, Path, str]] = []
+        self.photo_groups: list[tuple[int, tuple[Path, ...], str]] = []
         self.on_send = None
         self.commands: list[dict[str, str]] = []
         self.menu_button: dict[str, str] | None = None
@@ -94,6 +95,16 @@ class FakeTelegram:
         reply_to_message_id: int | None = None,
     ) -> None:
         self.photos.append((chat_id, path, caption))
+
+    def send_photos(
+        self,
+        chat_id: int,
+        paths: tuple[Path, ...],
+        *,
+        caption: str = "",
+    ) -> int:
+        self.photo_groups.append((chat_id, paths, caption))
+        return len(paths)
 
 
 class FakeRunner:
@@ -572,6 +583,25 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("multipart/form-data; boundary=", content_type)
         self.assertIn(b'name="photo"', body)
         self.assertIn(b"preview.png", body)
+
+    def test_send_photos_uses_one_media_group_request(self) -> None:
+        api = TelegramBotAPI("123456:abcdefghijklmnop")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = Path(temp_dir) / "first.png"
+            second = Path(temp_dir) / "second.png"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            with patch.object(api, "_request", return_value={"ok": True}) as request:
+                count = api.send_photos(123, (first, second), caption="Album")
+
+        content_type = request.call_args.kwargs["content_type"]
+        body = request.call_args.args[1]
+        self.assertEqual(2, count)
+        self.assertEqual("sendMediaGroup", request.call_args.args[0])
+        self.assertIn(b'name="media"', body)
+        self.assertIn(b"attach://photo0", body)
+        self.assertIn(b"attach://photo1", body)
+        self.assertIn("multipart/form-data; boundary=", content_type)
 
     def test_markdown_is_rendered_as_telegram_html(self) -> None:
         rendered = markdown_to_telegram_html(
@@ -1222,7 +1252,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([], pending)
         self.assertIn("Codex App 任务已完成", telegram.messages[0][1])
         self.assertIn("Optimize UI", telegram.messages[0][1])
-        self.assertEqual(1, len(telegram.photos))
+        self.assertEqual(1, len(telegram.photo_groups))
+        self.assertEqual(1, len(telegram.photo_groups[0][1]))
         self.assertIn("对话 ID：thread-1", telegram.messages[0][1])
         self.assertIn("界面优化已经完成", telegram.messages[0][1])
 

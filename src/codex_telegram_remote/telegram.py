@@ -218,6 +218,77 @@ class TelegramBotAPI:
             content_type=f"multipart/form-data; boundary={boundary}",
         )
 
+    def send_photos(
+        self,
+        chat_id: int,
+        paths: tuple[Path, ...],
+        *,
+        caption: str = "",
+    ) -> int:
+        valid: list[Path] = []
+        for path in paths:
+            if (
+                path.is_file()
+                and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                and path.stat().st_size <= 10 * 1024 * 1024
+            ):
+                valid.append(path)
+            if len(valid) >= 10:
+                break
+        if not valid:
+            return 0
+        if len(valid) == 1:
+            self.send_photo(chat_id, valid[0], caption=caption)
+            return 1
+
+        boundary = f"----CodexTelegram{uuid.uuid4().hex}"
+        media: list[dict[str, str]] = []
+        for index, _path in enumerate(valid):
+            item = {
+                "type": "photo",
+                "media": f"attach://photo{index}",
+            }
+            if index == 0 and caption:
+                item["caption"] = caption[:1024]
+            media.append(item)
+        fields = {
+            "chat_id": str(chat_id),
+            "media": json.dumps(
+                media,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        body = bytearray()
+        for key, value in fields.items():
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
+            )
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
+        for index, path in enumerate(valid):
+            content_type = (
+                mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            )
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(
+                (
+                    f'Content-Disposition: form-data; name="photo{index}"; '
+                    f'filename="{path.name}"\r\n'
+                ).encode("utf-8")
+            )
+            body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
+            body.extend(path.read_bytes())
+            body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode())
+        self._request(
+            "sendMediaGroup",
+            bytes(body),
+            content_type=f"multipart/form-data; boundary={boundary}",
+        )
+        return len(valid)
+
     def _request(
         self,
         method: str,
