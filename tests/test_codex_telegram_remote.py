@@ -526,10 +526,12 @@ class RunnerTests(unittest.TestCase):
             )
 
         self.assertIn("--sandbox", new_command)
+        self.assertIn("--skip-git-repo-check", new_command)
         self.assertIn("read-only", new_command)
         self.assertIn('approval_policy="never"', new_command)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", new_command)
         self.assertEqual(["exec", "resume"], resumed[1:3])
+        self.assertIn("--skip-git-repo-check", resumed)
         self.assertIn("session-1", resumed)
 
 
