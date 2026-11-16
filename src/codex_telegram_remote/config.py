@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 PROJECT_ROOT = Path.cwd().resolve()
@@ -75,6 +77,11 @@ class RemoteConfig:
     codex_thread_history_db: Path
     external_active_window_seconds: int
     watch_poll_seconds: int
+    repo_scan_root: Path | None
+    repo_refresh_enabled: bool
+    repo_refresh_time: str
+    repo_refresh_timezone: str
+    repo_exclude: tuple[str, ...]
 
     def validate(self, *, require_users: bool = True) -> list[str]:
         errors: list[str] = []
@@ -113,6 +120,21 @@ class RemoteConfig:
             )
         if self.watch_poll_seconds <= 0:
             errors.append("CODEX_REMOTE_WATCH_POLL_SECONDS 必须大于 0")
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", self.repo_refresh_time):
+            errors.append("CODEX_REMOTE_REPO_REFRESH_TIME 必须是 HH:MM")
+        try:
+            ZoneInfo(self.repo_refresh_timezone)
+        except ZoneInfoNotFoundError:
+            errors.append(
+                f"无效时区: {self.repo_refresh_timezone}"
+            )
+        if self.repo_refresh_enabled:
+            if self.repo_scan_root is None:
+                errors.append("未配置 CODEX_REMOTE_REPO_SCAN_ROOT")
+            elif not self.repo_scan_root.is_dir():
+                errors.append(
+                    f"仓库扫描根目录不存在: {self.repo_scan_root}"
+                )
         return errors
 
     def repository_for(self, chat_id: int, override: str = "") -> str:
@@ -190,6 +212,28 @@ def load_config(
             21600,
         ),
         watch_poll_seconds=_env_int("CODEX_REMOTE_WATCH_POLL_SECONDS", 20),
+        repo_scan_root=(
+            _path(scan_root_value, root)
+            if (scan_root_value := _env("CODEX_REMOTE_REPO_SCAN_ROOT", ""))
+            else None
+        ),
+        repo_refresh_enabled=_env_bool(
+            "CODEX_REMOTE_REPO_REFRESH_ENABLED",
+            False,
+        ),
+        repo_refresh_time=_env(
+            "CODEX_REMOTE_REPO_REFRESH_TIME",
+            "04:00",
+        ),
+        repo_refresh_timezone=_env(
+            "CODEX_REMOTE_REPO_REFRESH_TIMEZONE",
+            "Asia/Shanghai",
+        ),
+        repo_exclude=tuple(
+            item.strip()
+            for item in _env("CODEX_REMOTE_REPO_EXCLUDE", "").split(",")
+            if item.strip()
+        ),
     )
 
 

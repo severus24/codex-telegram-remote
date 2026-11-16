@@ -143,6 +143,19 @@ also accepted.
 | `/cancel` | Cancel the running Telegram task and queue |
 | `/help` | Show help |
 
+## Repository discovery
+
+The service scans immediate project directories under
+`CODEX_REMOTE_REPO_SCAN_ROOT`:
+
+- immediately after service startup
+- daily at `CODEX_REMOTE_REPO_REFRESH_TIME`
+- whenever `/repos` is opened
+
+Existing aliases and nested repositories such as `favorites` are preserved.
+Removed static repositories are dropped, and new directories receive a
+Telegram-safe alias.
+
 Selecting a recent thread stores its ID as the active session. Subsequent
 Telegram prompts are executed with:
 

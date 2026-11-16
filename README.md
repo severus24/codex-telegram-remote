@@ -176,6 +176,24 @@ Linux：
 | `/id` | 查看 Telegram User ID |
 | `/help` | 查看帮助 |
 
+## 仓库自动发现
+
+服务会扫描 `CODEX_REMOTE_REPO_SCAN_ROOT` 下的一级项目目录：
+
+- 服务启动时立即刷新一次
+- 每天在 `CODEX_REMOTE_REPO_REFRESH_TIME` 固定时间刷新
+- 打开 `/repos` 时再次手动刷新
+- 保留已有仓库别名和 `favorites` 等嵌套仓库
+- 自动移除已经不存在的静态仓库
+- 新目录会自动生成 Telegram 安全别名
+
+默认时区和时间：
+
+```dotenv
+CODEX_REMOTE_REPO_REFRESH_TIME=04:00
+CODEX_REMOTE_REPO_REFRESH_TIMEZONE=Asia/Shanghai
+```
+
 切换项目后，Bot 会显示：
 
 - 项目简介

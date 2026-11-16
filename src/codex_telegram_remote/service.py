@@ -4,8 +4,10 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from codex_telegram_remote.config import RemoteConfig
 from codex_telegram_remote.external_tasks import (
@@ -13,6 +15,10 @@ from codex_telegram_remote.external_tasks import (
     RecentTaskState,
 )
 from codex_telegram_remote.project_summary import summarize_project
+from codex_telegram_remote.repository_discovery import (
+    discover_repositories,
+    seconds_until_daily_time,
+)
 from codex_telegram_remote.runner import CodexRunError, CodexRunner
 from codex_telegram_remote.store import Job, RemoteStore
 from codex_telegram_remote.telegram import TelegramBotAPI, TelegramError
@@ -86,14 +92,23 @@ class CodexRemoteService:
             name="codex-remote-watcher",
             daemon=True,
         )
+        self._repo_refresher = threading.Thread(
+            target=self._repo_refresh_loop,
+            name="repository-catalog-refresher",
+            daemon=True,
+        )
+        self._repo_lock = threading.Lock()
         self._active_lock = threading.Lock()
         self._active: ActiveJob | None = None
 
     def run(self, *, once: bool = False) -> None:
         self.store.initialize()
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
+        self._refresh_repositories()
         self._worker.start()
         self._watcher.start()
+        if self.config.repo_refresh_enabled:
+            self._repo_refresher.start()
         threading.Thread(
             target=self._configure_telegram_ui,
             name="telegram-ui-config",
@@ -154,6 +169,8 @@ class CodexRemoteService:
             self._worker.join(timeout=10)
         if self._watcher.is_alive():
             self._watcher.join(timeout=10)
+        if self._repo_refresher.is_alive():
+            self._repo_refresher.join(timeout=10)
 
     def handle_update(self, update: dict[str, Any]) -> None:
         update_id = update.get("update_id")
@@ -256,6 +273,7 @@ class CodexRemoteService:
         elif command == "/id":
             response = f"User ID：{user_id}\nChat ID：{chat_id}"
         elif command == "/repos":
+            self._refresh_repositories()
             current = self._chat_repo(chat_id)
             response = self._repos_text(current)
             reply_markup = self._repos_markup(current)
@@ -346,6 +364,7 @@ class CodexRemoteService:
                 markup = self._panel_markup()
                 toast = "状态已刷新"
             elif action == "repos":
+                self._refresh_repositories()
                 current = self._chat_repo(chat_id)
                 response = self._repos_text(current)
                 markup = self._repos_markup(current)
@@ -495,6 +514,55 @@ class CodexRemoteService:
             except Exception:
                 LOGGER.exception("failed to check watched external tasks")
             self._stop_event.wait(self.config.watch_poll_seconds)
+
+    def _repo_refresh_loop(self) -> None:
+        try:
+            hour, minute = (
+                int(part) for part in self.config.repo_refresh_time.split(":")
+            )
+            timezone = ZoneInfo(self.config.repo_refresh_timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            LOGGER.exception("invalid repository refresh schedule")
+            return
+        while not self._stop_event.is_set():
+            now = datetime.now(timezone)
+            now_seconds = now.hour * 3600 + now.minute * 60 + now.second
+            delay = seconds_until_daily_time(hour, minute, now_seconds)
+            if self._stop_event.wait(delay):
+                return
+            self._refresh_repositories()
+
+    def _refresh_repositories(self) -> None:
+        scan_root = self.config.repo_scan_root
+        if not self.config.repo_refresh_enabled or scan_root is None:
+            return
+        discovered = discover_repositories(
+            scan_root,
+            self.config.repositories,
+            exclude=self.config.repo_exclude,
+        )
+        if not discovered:
+            LOGGER.warning("repository refresh returned an empty catalog")
+            return
+        with self._repo_lock:
+            previous = dict(self.config.repositories)
+            if discovered == previous:
+                return
+            added = sorted(set(discovered) - set(previous))
+            removed = sorted(set(previous) - set(discovered))
+            changed = sorted(
+                alias
+                for alias in set(discovered) & set(previous)
+                if discovered[alias] != previous[alias]
+            )
+            self.config.repositories.clear()
+            self.config.repositories.update(discovered)
+        LOGGER.info(
+            "repository catalog refreshed added=%s removed=%s changed=%s",
+            ",".join(added),
+            ",".join(removed),
+            ",".join(changed),
+        )
 
     def _auto_watch_external_tasks(self) -> None:
         active = self.external_tasks.running_all()
@@ -974,7 +1042,12 @@ class CodexRemoteService:
             LOGGER.exception("failed to configure telegram command menu")
 
     def _chat_repo(self, chat_id: int) -> str:
-        return self.store.get_chat_repo(chat_id, self.config.default_repo)
+        repo = self.store.get_chat_repo(chat_id, self.config.default_repo)
+        if repo in self.config.repositories:
+            return repo
+        if self.config.default_repo in self.config.repositories:
+            return self.config.default_repo
+        return next(iter(sorted(self.config.repositories)), "")
 
     def _safe_send(
         self,

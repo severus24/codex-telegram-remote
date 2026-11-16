@@ -19,6 +19,10 @@ from codex_telegram_remote.external_tasks import (
     TurnState,
 )
 from codex_telegram_remote.project_summary import summarize_project
+from codex_telegram_remote.repository_discovery import (
+    discover_repositories,
+    seconds_until_daily_time,
+)
 from codex_telegram_remote.runner import (
     CodexRunner,
     CodexRunError,
@@ -249,6 +253,42 @@ class ProjectSummaryTests(unittest.TestCase):
             summary = summarize_project(root)
 
         self.assertIn("responsive invitation page", summary)
+
+
+class RepositoryDiscoveryTests(unittest.TestCase):
+    def test_discovers_projects_and_preserves_nested_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            alpha = root / "Alpha"
+            beta = root / "NewProject"
+            hidden = root / ".hidden"
+            nested = alpha / "Favorites"
+            for path in (alpha, beta, hidden, nested):
+                path.mkdir(parents=True, exist_ok=True)
+            discovered = discover_repositories(
+                root,
+                {
+                    "custom-alpha": alpha,
+                    "favorites": nested,
+                    "stale": root / "Missing",
+                },
+            )
+
+        self.assertEqual(alpha.resolve(), discovered["custom-alpha"])
+        self.assertEqual(beta.resolve(), discovered["newproject"])
+        self.assertEqual(nested.resolve(), discovered["favorites"])
+        self.assertNotIn("stale", discovered)
+        self.assertNotIn("hidden", discovered)
+
+    def test_daily_delay_wraps_to_next_day(self) -> None:
+        self.assertEqual(
+            1800,
+            seconds_until_daily_time(4, 0, 3 * 3600 + 30 * 60),
+        )
+        self.assertEqual(
+            23 * 3600,
+            seconds_until_daily_time(4, 0, 5 * 3600),
+        )
 
 
 class ExternalTaskTests(unittest.TestCase):
@@ -1190,6 +1230,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual("thread-global", pending[0].thread_id)
         self.assertEqual("UnlistedProject", pending[0].repo)
 
+    def test_repository_refresh_adds_new_project_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repo = root / "repo"
+            new_project = root / "NewProject"
+            repo.mkdir()
+            new_project.mkdir()
+            config = _config(
+                root,
+                repo,
+                repo_scan_root=root,
+                repo_refresh_enabled=True,
+            )
+            store = RemoteStore(root / "state.db")
+            store.initialize()
+            service = CodexRemoteService(
+                config=config,
+                telegram=FakeTelegram(),
+                store=store,
+                runner=FakeRunner(),
+                external_tasks=FakeExternalTaskMonitor(
+                    ExternalTaskState(tasks=(), available=True)
+                ),
+            )
+            service._refresh_repositories()
+
+        self.assertEqual(new_project.resolve(), config.repositories["newproject"])
+        self.assertIn("demo", config.repositories)
+
     def test_message_reaction_confirms_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1556,6 +1625,8 @@ def _config(
     repo: Path,
     *,
     repositories: dict[str, Path] | None = None,
+    repo_scan_root: Path | None = None,
+    repo_refresh_enabled: bool = False,
 ) -> RemoteConfig:
     return RemoteConfig(
         project_root=root,
@@ -1581,6 +1652,11 @@ def _config(
         codex_thread_history_db=root / "missing-thread-history.sqlite",
         external_active_window_seconds=21600,
         watch_poll_seconds=20,
+        repo_scan_root=repo_scan_root,
+        repo_refresh_enabled=repo_refresh_enabled,
+        repo_refresh_time="04:00",
+        repo_refresh_timezone="Asia/Shanghai",
+        repo_exclude=(),
     )
 
 
